@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Листопад: подработка</title>
+<style>
+:root{--bg:#1d2a1a;--panel:#26361f;--ink:#f3ead2;--acc:#e8a33d;--dim:#9db38a;color-scheme:dark}
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font:15px/1.35 Georgia,"Times New Roman",serif;touch-action:none;user-select:none}
+canvas{display:block;width:100%;height:100%}
+.hud{position:fixed;top:0;left:0;right:0;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;pointer-events:none}
+.chip{background:rgba(29,42,26,.85);padding:6px 12px;border-radius:10px;font-size:16px}
+.money{font-size:22px;color:var(--acc);font-weight:bold}
+button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid #4a6139;border-radius:10px;padding:8px 12px;cursor:pointer;pointer-events:auto}
+button:hover:not(:disabled){border-color:var(--acc)}button:disabled{opacity:.45;cursor:default}
+button.sel{background:var(--acc);color:#2a1d05;border-color:var(--acc)}
+.bar{position:fixed;left:0;right:0;bottom:0;padding:8px 12px calc(10px + env(safe-area-inset-bottom,0px));display:flex;gap:8px;justify-content:space-between;align-items:flex-end;pointer-events:none}
+.tools{display:flex;gap:6px;flex-wrap:wrap}
+#use{width:84px;height:84px;border-radius:50%;background:var(--acc);color:#2a1d05;font-weight:bold;border:0}
+#msg{position:fixed;top:30%;left:0;right:0;text-align:center;font-size:22px;color:var(--acc);pointer-events:none;opacity:0;transition:opacity .3s;text-shadow:0 2px 6px #000}
+#shop{position:fixed;inset:0;background:rgba(10,16,8,.88);display:none;overflow:auto;padding:calc(16px + env(safe-area-inset-top,0px)) 14px 24px;touch-action:pan-y}
+#shop .in{max-width:560px;margin:0 auto}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--panel);border-radius:10px;padding:10px 12px;margin:8px 0}
+.row small{color:var(--dim);display:block}
+h2{margin:14px 0 4px;font-size:18px}
+.hint{color:var(--dim);font-size:13px}
+</style></head><body>
+<canvas id="c"></canvas>
+<div class="hud"><div class="chip money" id="money">$0.00</div><div class="chip" id="bag"></div><div class="chip" id="loc"></div><button id="shopBtn">Магазин</button></div>
+<div id="msg"></div>
+<div class="bar"><div><div class="tools" id="tools"></div><div class="hint chip" style="margin-top:6px">WASD — ходить · пробел или мышь — действие · 1–4 — инструмент · мусорный бак — сдать мешок</div></div><button id="use">ЖМИ</button></div>
+<div id="shop"><div class="in"><div class="row"><b>Магазин</b><button id="close">Закрыть</button></div><div id="shopBody"></div></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const PAY=0.05, B=20;
+const S={money:0,bag:0,bagLvl:0,tool:'hand',loc:0,
+ tools:{hand:{own:1,lvl:1},rake:{own:0,lvl:1},blower:{own:0,lvl:1},vac:{own:0,lvl:1}},unlocked:[1,0,0]};
+const T={hand:{n:'Рука',price:0,up:0.5},rake:{n:'Грабли',price:7.99,up:4},blower:{n:'Ветродув',price:29.99,up:15},vac:{n:'Пылесос',price:249.99,up:100}};
+const LOCS=[{n:'Передний двор',price:0,n_leaves:300,col:0x6a8f3a},{n:'Задний двор',price:15,n_leaves:450,col:0x4f7d34},{n:'Бассейн',price:60,n_leaves:600,col:0x8a9a5b}];
+const cap=()=>Math.round(10*Math.pow(1.6,S.bagLvl));
+const upCost=k=>+(T[k].up*Math.pow(1.6,S.tools[k].lvl-1)).toFixed(2);
+const bagCost=()=>+(0.5*Math.pow(1.8,S.bagLvl)).toFixed(2);
+const $$=n=>'$'+n.toFixed(2);
+
+// scene
+const cv=$('c'),R=new THREE.WebGLRenderer({canvas:cv,antialias:true});
+R.setPixelRatio(Math.min(devicePixelRatio,2));
+const sc=new THREE.Scene();sc.background=new THREE.Color(0xbcd7e8);sc.fog=new THREE.Fog(0xbcd7e8,30,70);
+const cam=new THREE.PerspectiveCamera(55,1,.1,200);
+function rs(){R.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()}
+addEventListener('resize',rs);rs();
+sc.add(new THREE.HemisphereLight(0xffffff,0x556644,.85));
+const sun=new THREE.DirectionalLight(0xfff0d0,.7);sun.position.set(10,20,8);sc.add(sun);
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(B*2+2,B*2+2),new THREE.MeshLambertMaterial({color:0x6a8f3a}));
+ground.rotation.x=-Math.PI/2;sc.add(ground);
+const fence=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshLambertMaterial({color:0xb08a5a}));
+[[0,-B-.5,B*2+2,1],[0,B+.5,B*2+2,1],[-B-.5,0,1,B*2+2],[B+.5,0,1,B*2+2]].forEach(([x,z,w,d])=>{const m=fence.clone();m.position.set(x,.6,z);m.scale.set(w,1.2,d);sc.add(m)});
+const BINS=[[-1,-1],[1,-1],[-1,1],[1,1]].map(([a,b])=>({x:a*(B-3),z:b*(B-3)})).concat([{x:0,z:-(B-3)},{x:-(B-3),z:0},{x:B-3,z:0},{x:0,z:B-3}]);
+const binGeo=new THREE.CylinderGeometry(1.4,1.2,2.2,12),binMat=new THREE.MeshLambertMaterial({color:0x3b6ea5});
+BINS.forEach(b=>{const m=new THREE.Mesh(binGeo,binMat);m.position.set(b.x,1.1,b.z);sc.add(m)});
+const pool=new THREE.Mesh(new THREE.BoxGeometry(14,.1,9),new THREE.MeshLambertMaterial({color:0x3fa7d6}));
+pool.position.set(4,.06,2);sc.add(pool);
+const POOL={x1:-3,x2:11,z1:-2.5,z2:6.5};
+const pl=new THREE.Group();
+const body=new THREE.Mesh(new THREE.CylinderGeometry(.5,.6,1.4,10),new THREE.MeshLambertMaterial({color:0xe8a33d}));body.position.y=.8;
+const head=new THREE.Mesh(new THREE.SphereGeometry(.4,12,10),new THREE.MeshLambertMaterial({color:0xf1c9a0}));head.position.y=1.8;
+const nose=new THREE.Mesh(new THREE.BoxGeometry(.25,.25,.5),new THREE.MeshLambertMaterial({color:0x333}));nose.position.set(0,1.7,.4);
+pl.add(body,head,nose);sc.add(pl);
+const P={x:0,z:0,fx:0,fz:-1};
+
+// leaves
+const MAX=600,leaves=[];
+const im=new THREE.InstancedMesh(new THREE.PlaneGeometry(.55,.55),new THREE.MeshBasicMaterial({side:THREE.DoubleSide}),MAX);
+sc.add(im);const D=new THREE.Object3D();
+const pal=[0xd9531e,0xe8a33d,0xc23b22,0xa86b2d,0xe3c04a].map(c=>new THREE.Color(c));
+for(let i=0;i<MAX;i++){leaves.push({a:0,x:0,z:0,vx:0,vz:0,r:0,pull:0,blown:0});im.setColorAt(i,pal[i%5])}
+const inPool=(x,z)=>S.loc==2&&x>POOL.x1-.5&&x<POOL.x2+.5&&z>POOL.z1-.5&&z<POOL.z2+.5;
+function spawn(){
+ const n=LOCS[S.loc].n_leaves;
+ leaves.forEach((l,i)=>{l.a=i<n;l.vx=l.vz=l.pull=l.blown=0;l.r=Math.random()*6;l.x=(Math.random()*2-1)*(B-1);l.z=(Math.random()*2-1)*(B-1)});
+ im.instanceColor.needsUpdate=true;
+}
+function setLoc(i){
+ S.loc=i;ground.material.color.setHex(LOCS[i].col);pool.visible=i==2;
+ P.x=0;P.z=0;S.bag=0;spawn();ui();
+}
+
+// input
+const keys={};let using=false,tdx=0,tdz=0,tOrig=null;
+const KM={KeyW:'w',KeyA:'a',KeyS:'s',KeyD:'d',ArrowUp:'arrowup',ArrowDown:'arrowdown',ArrowLeft:'arrowleft',ArrowRight:'arrowright',Digit1:'1',Digit2:'2',Digit3:'3',Digit4:'4',Numpad1:'1',Numpad2:'2',Numpad3:'3',Numpad4:'4'};
+window.focus();
+addEventListener('keydown',e=>{
+ if(e.code=='Space'){using=true;e.preventDefault()}
+ const k=KM[e.code]||'';if(k){keys[k]=1;e.preventDefault()}
+ const order=['hand','rake','blower','vac'];
+ if('1234'.includes(k)&&k.length==1){const t=order[+k-1];if(S.tools[t].own){S.tool=t;ui()}}
+});
+addEventListener('keyup',e=>{if(e.code=='Space')using=false;const k=KM[e.code];if(k)keys[k]=0});
+addEventListener('blur',()=>{for(const k in keys)keys[k]=0;using=false});
+cv.addEventListener('pointerdown',e=>{
+ if(e.pointerType=='mouse'){using=true}else{tOrig=[e.clientX,e.clientY]}
+});
+cv.addEventListener('pointermove',e=>{
+ if(tOrig&&e.pointerType!='mouse'){tdx=Math.max(-1,Math.min(1,(e.clientX-tOrig[0])/50));tdz=Math.max(-1,Math.min(1,(e.clientY-tOrig[1])/50))}
+});
+addEventListener('pointerup',e=>{if(e.pointerType=='mouse')using=false;tOrig=null;tdx=tdz=0});
+const ub=$('use');ub.addEventListener('pointerdown',e=>{using=true;e.stopPropagation()});
+ub.addEventListener('pointerup',()=>using=false);ub.addEventListener('pointerleave',()=>using=false);
+
+// ui
+let mt=0;
+function say(t){const m=$('msg');m.textContent=t;m.style.opacity=1;clearTimeout(mt);mt=setTimeout(()=>m.style.opacity=0,1400)}
+function ui(){
+ $('money').textContent=$$(S.money);
+ $('bag').textContent='Мешок: '+S.bag+' / '+cap();
+ $('loc').textContent=LOCS[S.loc].n;
+ const order=['hand','rake','blower','vac'];
+ $('tools').innerHTML=order.filter(k=>S.tools[k].own).map((k,i)=>`<button class="${S.tool==k?'sel':''}" data-t="${k}">${order.indexOf(k)+1}. ${T[k].n} ур.${S.tools[k].lvl}</button>`).join('');
+ if($('shop').style.display=='block')shop();
+}
+function shop(){
+ const order=['hand','rake','blower','vac'];let h='<h2>Инструменты</h2>';
+ order.forEach(k=>{const t=S.tools[k];
+  if(!t.own)h+=`<div class="row"><div>${T[k].n}<small>${{rake:'притягивает листья вокруг',blower:'отталкивает листья от тебя',vac:'засасывает листья прямо в мешок'}[k]}</small></div><button data-buy="${k}" ${S.money<T[k].price?'disabled':''}>${$$(T[k].price)}</button></div>`;
+  else h+=`<div class="row"><div>${T[k].n}<small>уровень ${t.lvl}: больше зона и сила</small></div><button data-up="${k}" ${S.money<upCost(k)?'disabled':''}>Улучшить ${$$(upCost(k))}</button></div>`});
+ h+=`<h2>Мешок</h2><div class="row"><div>Вместимость ${cap()}<small>следующий уровень: ${Math.round(10*Math.pow(1.6,S.bagLvl+1))}</small></div><button data-bag="1" ${S.money<bagCost()?'disabled':''}>${$$(bagCost())}</button></div>`;
+ h+='<h2>Локации</h2>';
+ LOCS.forEach((l,i)=>{h+=`<div class="row"><div>${l.n}<small>${l.n_leaves} листьев</small></div>`+(S.unlocked[i]?`<button data-go="${i}" ${S.loc==i?'disabled':''}>${S.loc==i?'Ты здесь':'Пойти'}</button>`:`<button data-unl="${i}" ${S.money<l.price?'disabled':''}>${$$(l.price)}</button>`)+'</div>'});
+ h+='<p class="hint">За каждый лист платят $0.05. Сдавай мешок в синий бак.</p>';
+ $('shopBody').innerHTML=h;
+}
+$('shopBtn').onclick=()=>{$('shop').style.display='block';shop()};
+$('close').onclick=()=>$('shop').style.display='none';
+document.addEventListener('click',e=>{
+ const d=e.target.closest('button');if(!d)return;const a=d.dataset;
+ if(a.t){S.tool=a.t}
+ if(a.buy&&S.money>=T[a.buy].price){S.money-=T[a.buy].price;S.tools[a.buy].own=1;S.tool=a.buy}
+ if(a.up&&S.money>=upCost(a.up)){S.money-=upCost(a.up);S.tools[a.up].lvl++}
+ if(a.bag&&S.money>=bagCost()){S.money-=bagCost();S.bagLvl++}
+ if(a.unl!==undefined&&S.money>=LOCS[a.unl].price){S.money-=LOCS[a.unl].price;S.unlocked[a.unl]=1}
+ if(a.go!==undefined){setLoc(+a.go);$('shop').style.display='none'}
+ if(a.t||a.buy||a.up||a.bag||a.unl!==undefined||a.go!==undefined)ui();
+});
+
+// game loop
+function take(l){if(S.bag>=cap()){say('Мешок полный! Неси в бак');return false}S.bag++;l.a=false;return true}
+let cd=0,dirty=0;
+function step(dt){
+ // move
+ let mx=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0)+tdx;
+ let mz=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0)+tdz;
+ const ml=Math.hypot(mx,mz);
+ if(ml>.05){const k=Math.min(1,ml)/ml;mx*=k;mz*=k;
+  const sp=7*dt,nx=Math.max(-B+1,Math.min(B-1,P.x+mx*sp)),nz=Math.max(-B+1,Math.min(B-1,P.z+mz*sp));
+  if(!inPool(nx,P.z))P.x=nx;if(!inPool(P.x,nz))P.z=nz;
+  const f=Math.hypot(mx,mz);P.fx=mx/f;P.fz=mz/f}
+ pl.position.set(P.x,0,P.z);pl.rotation.y=Math.atan2(P.fx,P.fz);
+ // dump
+ if(S.bag>0&&BINS.some(b=>Math.hypot(P.x-b.x,P.z-b.z)<3.5)){S.money+=S.bag*PAY;say('+'+$$(S.bag*PAY));S.bag=0;dirty=1}
+ // tool
+ const lv=S.tools[S.tool].lvl;cd-=dt;
+ if(using){
+  if(S.tool=='hand'&&cd<=0){cd=.18;const r=2.4+.3*lv;let n=2+lv;
+   for(const l of leaves){if(!l.a||n<=0)continue;if(Math.hypot(l.x-P.x,l.z-P.z)<r){if(!take(l))break;n--;dirty=1}}}
+  if(S.tool=='rake'&&cd<=0){cd=.6;const r=5+1.2*lv;
+   for(const l of leaves){if(!l.a)continue;const dx=P.x-l.x,dz=P.z-l.z,d=Math.hypot(dx,dz);
+    if(d<r){const s=16/Math.max(d,.1);l.vx=dx*s/ (d||1)*(d||1)*.0+dx/d*16;l.vz=dz/d*16;l.pull=.9}}}
+  if(S.tool=='blower'){const r=7+1.5*lv;
+   for(const l of leaves){if(!l.a)continue;const dx=l.x-P.x,dz=l.z-P.z,d=Math.hypot(dx,dz)||.01;
+    if(d<r&&(dx*P.fx+dz*P.fz)/d>.55){l.vx+=P.fx*(50+8*lv)*dt;l.vz+=P.fz*(50+8*lv)*dt;l.blown=1}}}
+  if(S.tool=='vac'){const r=6+1.4*lv;
+   for(const l of leaves){if(!l.a)continue;const dx=P.x-l.x,dz=P.z-l.z,d=Math.hypot(dx,dz)||.01;
+    if(d<r&&((-dx*P.fx-dz*P.fz)/d>.4||d<2.2)){l.vx+=dx/d*(45+6*lv)*dt;l.vz+=dz/d*(45+6*lv)*dt;l.pull=.5}}}
+ }
+ // leaves
+ let alive=0;const fr=Math.exp(-3.2*dt);
+ for(const l of leaves){if(!l.a)continue;alive++;
+  l.x+=l.vx*dt;l.z+=l.vz*dt;l.vx*=fr;l.vz*=fr;l.pull-=dt;l.r+=dt*(Math.abs(l.vx)+Math.abs(l.vz))*.2;
+  if(l.pull>0&&Math.hypot(l.x-P.x,l.z-P.z)<1.2){if(take(l))dirty=1;else{l.pull=0}continue}
+  if(Math.abs(l.x)>B||Math.abs(l.z)>B){l.a=false;if(l.blown){S.money+=PAY;dirty=1}else{l.x=Math.max(-B,Math.min(B,l.x));l.z=Math.max(-B,Math.min(B,l.z));l.a=true;l.vx=l.vz=0}}
+ }
+ if(alive<LOCS[S.loc].n_leaves*.08){say('Ветер принёс новые листья!');spawn()}
+ if(dirty){dirty=0;ui()}
+}
+function draw(){
+ let i=0;
+ for(const l of leaves){
+  if(l.a){D.position.set(l.x,.08,l.z);D.rotation.set(-Math.PI/2,0,l.r);D.scale.set(1,1,1)}
+  else{D.position.set(0,-5,0);D.scale.set(0,0,0)}
+  D.updateMatrix();im.setMatrixAt(i++,D.matrix)}
+ im.instanceMatrix.needsUpdate=true;
+ cam.position.set(P.x,17,P.z+13);cam.lookAt(P.x,0,P.z-1);
+ R.render(sc,cam);
+}
+let last=performance.now();
+(function loop(t){const dt=Math.min(.05,(t-last)/1000);last=t;step(dt);draw();requestAnimationFrame(loop)})(last);
+setLoc(0);
+</script></body></html>
